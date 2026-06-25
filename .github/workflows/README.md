@@ -18,6 +18,10 @@ vim ../startos/versions/current.ts
 git commit -am "bump to v1.2.3"
 git tag v1.2.3
 git push origin main --follow-tags
+
+or
+
+git tag -d v1.0.0 && git push origin :v1.0.0 && git tag v1.0.0 && git push origin v1.0.0
 ```
 
 `sideload.yml` picks up the tag, builds `elektron-net-faucet.s9pk` for
