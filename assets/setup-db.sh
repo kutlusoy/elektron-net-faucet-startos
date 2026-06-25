@@ -16,7 +16,15 @@ DB_NAME=elek_faucet
 DB_USER=elek_faucet
 ADMIN_USER_FILE="$CRED_DIR/admin_username"
 ADMIN_PASS_FILE="$CRED_DIR/admin_password"
-INSTALLED_MARKER=/opt/faucet/.installed
+
+# /etc/elektron-faucet is mounted from the package volume, so this marker
+# survives across container restarts. Earlier versions put it under
+# /opt/faucet which is the (ephemeral) image filesystem — every restart
+# would then re-run the admin upsert and clobber any password change
+# made through /admin.php. The companion symlink at /opt/faucet/.installed
+# points back here so upstream install.php still sees a lock file and
+# refuses to run.
+INSTALLED_MARKER="$CRED_DIR/.installed"
 
 mkdir -p "$CRED_DIR"
 
@@ -47,7 +55,8 @@ ADMIN_PASS="$(cat "$ADMIN_PASS_FILE")"
 
 # --- Connect as root (TCP) — start-mariadb.sh seeds this user on first boot ---
 ROOT_CNF="$(mktemp)"
-trap 'rm -f "$ROOT_CNF"' EXIT
+APP_CNF="$(mktemp)"
+trap 'rm -f "$ROOT_CNF" "$APP_CNF"' EXIT
 cat > "$ROOT_CNF" <<EOF
 [client]
 host=${DB_HOST}
@@ -80,9 +89,6 @@ PHP
 chown www-data:www-data "$CFG" || true
 chmod 0640 "$CFG"
 
-# --- Apply schema (idempotent: CREATE TABLE IF NOT EXISTS throughout) ---
-APP_CNF="$(mktemp)"
-trap 'rm -f "$ROOT_CNF" "$APP_CNF"' EXIT
 cat > "$APP_CNF" <<EOF
 [client]
 host=${DB_HOST}
@@ -93,13 +99,11 @@ database=${DB_NAME}
 EOF
 chmod 600 "$APP_CNF"
 
+# --- Apply schema (idempotent: CREATE TABLE IF NOT EXISTS throughout) ---
 mariadb --defaults-extra-file="$APP_CNF" < /opt/faucet/sql/schema.sql
 
-# --- Seed default settings on first install ---
 if [ ! -f "$INSTALLED_MARKER" ]; then
-    # Mirrors public/install.php defaults so the user gets a fully populated
-    # admin page out of the box. Skipped on subsequent runs so operator edits
-    # in the admin panel are not clobbered.
+    # --- Seed default settings, mirroring public/install.php defaults ---
     mariadb --defaults-extra-file="$APP_CNF" <<SQL
 INSERT IGNORE INTO settings (\`key\`, \`value\`) VALUES
     ('faucet_title',        'Elektron Net Faucet'),
@@ -113,13 +117,10 @@ INSERT IGNORE INTO settings (\`key\`, \`value\`) VALUES
     ('rpc_port',            '8332'),
     ('default_lang',        'en');
 SQL
-fi
 
-# --- Create / upsert the admin user (only resets password if the file was
-#     changed since last run — tracked via the .installed marker). The
-#     Reset Admin Password StartOS action rewrites $ADMIN_PASS_FILE then
-#     deletes $INSTALLED_MARKER so the next start re-syncs the hash. ---
-if [ ! -f "$INSTALLED_MARKER" ]; then
+    # --- Create the admin user. INSERT IGNORE so an existing row's hash
+    #     (e.g. one the operator updated through /admin.php in a previous
+    #     run, before we hardened this) is left untouched. ---
     ADMIN_HASH=$(ADMIN_PASS="$ADMIN_PASS" php -r 'echo password_hash(getenv("ADMIN_PASS"), PASSWORD_ARGON2ID);')
     ADMIN_USER="$ADMIN_USER" ADMIN_HASH="$ADMIN_HASH" \
         FAUCET_CONFIG="$CFG" php -r '
@@ -131,15 +132,22 @@ if [ ! -f "$INSTALLED_MARKER" ]; then
                 [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]
             );
             $stmt = $pdo->prepare(
-                "INSERT INTO admin_users (username, password_hash) VALUES (?, ?)
-                 ON DUPLICATE KEY UPDATE password_hash = VALUES(password_hash)"
+                "INSERT IGNORE INTO admin_users (username, password_hash) VALUES (?, ?)"
             );
             $stmt->execute([getenv("ADMIN_USER"), getenv("ADMIN_HASH")]);
         '
+
+    # Persistent marker so this block is skipped on subsequent restarts.
+    date +%FT%T > "$INSTALLED_MARKER"
+    chmod 600 "$INSTALLED_MARKER"
 fi
 
-# --- Mark install complete so the upstream install.php wizard refuses to run
-#     (it would otherwise overwrite our config.php and admin user). ---
-touch "$INSTALLED_MARKER" || true
+# Upstream install.php checks dirname(__DIR__) . '/.installed' = /opt/faucet/.installed.
+# /opt/faucet is the image layer (ephemeral), so we cannot leave a real file
+# there across restarts. Use a symlink into the persistent volume.
+if [ ! -e /opt/faucet/.installed ]; then
+    ln -sf "$INSTALLED_MARKER" /opt/faucet/.installed || \
+        touch /opt/faucet/.installed || true
+fi
 
 echo "[setup-db] ready (admin user: ${ADMIN_USER})"
