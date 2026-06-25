@@ -56,7 +56,23 @@ jobs:
             squashfs-tools squashfs-tools-ng
 
       - name: Install start-cli
-        run: curl -fsSL https://start9.com/start-cli/install.sh | sh
+        # The official installer at start9.com/start-cli/install.sh is gated
+        # behind Cloudflare and returns 403 to GitHub-Actions runners, so we
+        # pull the binary straight from the Start9Labs/start-os release
+        # assets instead. Matches the runner arch (x86_64).
+        run: |
+          set -euo pipefail
+          arch="$(uname -m)"
+          asset="start-cli_${arch}-linux"
+          url="$(curl -fsSL https://api.github.com/repos/Start9Labs/start-os/releases/latest \
+                  | jq -r --arg n "$asset" '.assets[] | select(.name == $n) | .browser_download_url')"
+          if [ -z "$url" ] || [ "$url" = "null" ]; then
+            echo "Could not find $asset in the latest Start9Labs/start-os release" >&2
+            exit 1
+          fi
+          sudo curl -fsSL "$url" -o /usr/local/bin/start-cli
+          sudo chmod +x /usr/local/bin/start-cli
+          start-cli --version || true
 
       - name: Install npm dependencies
         # `npm install` (not `npm ci`) so git dependencies resolve cleanly.
