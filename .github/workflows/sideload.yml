@@ -1,0 +1,95 @@
+# Sideload build for Elektron Net Faucet StartOS
+#
+# Pushing a tag `v<X.Y.Z>` builds the .s9pk and creates a GitHub Release
+# named "Elektron Net Faucet StartOS Release v<X.Y.Z>".
+#
+# The full StartOS package version (including the `:N` revision suffix) is
+# read directly from `startos/versions/current.ts` and managed manually —
+# bump it there before tagging.
+#
+# Self-contained: the Makefile's `INGREDIENTS := $(shell start-cli s9pk
+# list-ingredients ...)` is evaluated at parse time from javascript/index.js,
+# so we compile TypeScript before invoking make.
+#
+# No secrets required: start-cli init-key generates an ephemeral signing
+# key for each build. Set the DEV_KEY secret if you want stable signatures.
+
+name: Sideload
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential python3 \
+            squashfs-tools squashfs-tools-ng
+
+      - name: Install start-cli
+        run: curl -fsSL https://start9.com/start-cli/install.sh | sh
+
+      - name: Install npm dependencies
+        # `npm install` (not `npm ci`) so git dependencies resolve cleanly.
+        run: npm install
+
+      - name: Init developer key
+        run: |
+          if [ -n "${{ secrets.DEV_KEY }}" ]; then
+            mkdir -p ~/.startos
+            printf '%s' "${{ secrets.DEV_KEY }}" > ~/.startos/developer.key.pem
+          else
+            start-cli init-key
+          fi
+
+      - name: Compile TypeScript to javascript/index.js
+        run: npm run build
+
+      - name: Build s9pk
+        run: make
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: elektron-net-faucet-s9pk
+          path: '*.s9pk'
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "Elektron Net Faucet StartOS Release ${{ github.ref_name }}"
+          files: '*.s9pk'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

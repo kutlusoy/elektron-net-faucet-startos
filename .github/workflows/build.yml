@@ -1,0 +1,27 @@
+# Upstream Start9 marketplace build pipeline...
+#
+# Disabled for personal use: only `workflow_dispatch` (manual) trigger is
+# active. To re-enable for an upstream adoption, replace the `on:` block
+# below with the original:
+#
+#   on:
+#     workflow_dispatch:
+#     pull_request:
+#       paths-ignore: ['*.md']
+#       branches: ['main']
+
+name: Build
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: github.event.pull_request.draft == false
+    uses: start9labs/shared-workflows/.github/workflows/build.yml@master
+    secrets:
+      DEV_KEY: ${{ secrets.DEV_KEY }}

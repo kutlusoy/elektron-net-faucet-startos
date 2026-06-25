@@ -1,0 +1,15 @@
+[mysqld]
+bind-address     = 127.0.0.1
+port             = 3306
+datadir          = /var/lib/mysql
+socket           = /run/mysqld/mysqld.sock
+skip-name-resolve
+max_connections  = 100
+character-set-server = utf8mb4
+collation-server = utf8mb4_unicode_ci
+innodb_buffer_pool_size = 128M
+log_error        = /var/log/elektron-faucet/mariadb.log
+
+[client]
+socket           = /run/mysqld/mysqld.sock
+default-character-set = utf8mb4
