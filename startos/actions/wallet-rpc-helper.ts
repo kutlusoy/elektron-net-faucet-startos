@@ -27,7 +27,12 @@ export const sharedMounts = () =>
  * (overrides the configured wallet_name) from env, prints the JSON result
  * on stdout (or the JSON error to stderr + exit 1).
  */
-export const RPC_PHP = String.raw`
+// Plain template literal (not String.raw): the only escape we rely on is
+// `\`` so the backticks around the MariaDB-reserved column names `key`
+// and `value` survive into the generated PHP source verbatim. String.raw
+// would keep the preceding backslashes literal and MariaDB would reject
+// the SQL.
+export const RPC_PHP = `
 $cfg = require '/etc/elektron-faucet/config.php';
 $pdo = new PDO(
     sprintf("mysql:host=%s;port=%d;dbname=%s;charset=utf8mb4",
