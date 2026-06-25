@@ -1,0 +1,34 @@
+# Upstream Start9 marketplace tag + release pipeline.
+#
+# Disabled for personal use: only `workflow_dispatch` (manual) trigger is
+# active. Without this guard the workflow would fire on every push to
+# `main`. To re-enable for an upstream adoption, replace the `on:` block
+# below with the original:
+#
+#   on:
+#     push:
+#       branches: ['main']
+#       paths-ignore: ['*.md']
+
+name: Tag and Release
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tag:
+    uses: start9labs/shared-workflows/.github/workflows/tagAndRelease.yml@master
+    with:
+      REFERENCE_REGISTRY: ${{ vars.REFERENCE_REGISTRY }}
+      RELEASE_REGISTRY: ${{ vars.RELEASE_REGISTRY }}
+      S3_S9PKS_BASE_URL: ${{ vars.S3_S9PKS_BASE_URL }}
+    secrets:
+      DEV_KEY: ${{ secrets.DEV_KEY }}
+      S3_ACCESS_KEY: ${{ secrets.S3_ACCESS_KEY }}
+      S3_SECRET_KEY: ${{ secrets.S3_SECRET_KEY }}
+    permissions:
+      contents: write
