@@ -6,6 +6,8 @@ import { walletLoad } from './wallet-load'
 import { walletInfo } from './wallet-info'
 import { walletImportKey } from './wallet-import-key'
 import { walletImportDescriptor } from './wallet-import-descriptor'
+import { walletImportDump } from './wallet-import-dump'
+import { walletSetSenderAddress } from './wallet-set-sender-address'
 
 export const actions = sdk.Actions.of()
   .addAction(showAdmin)
@@ -15,3 +17,5 @@ export const actions = sdk.Actions.of()
   .addAction(walletInfo)
   .addAction(walletImportKey)
   .addAction(walletImportDescriptor)
+  .addAction(walletImportDump)
+  .addAction(walletSetSenderAddress)

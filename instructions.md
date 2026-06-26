@@ -11,10 +11,10 @@ same wallet.
 - Bundled **nginx + PHP-FPM + MariaDB** — no external database needed; all
   state lives in the encrypted StartOS volume and is included in backups.
 - Built-in StartOS **actions** for everything elektron-net-startos does not
-  expose itself: admin login retrieval, admin password rotation, and full
-  wallet management (create / load / info / import private key / import
-  descriptor) — all driven through the elektrond RPC the faucet is already
-  configured with.
+  expose itself: admin credential management, full wallet management (create
+  / load / info / import private key / import descriptor / import full
+  dumpwallet) and a one-click "generate-and-set Sender Address" — all
+  driven through the elektrond RPC the faucet is already configured with.
 
 ---
 
@@ -40,7 +40,9 @@ Password: <24-char random hex>
 ```
 
 The bootstrap created these on first start. Run **Reset Admin Password**
-any time you want to change them.
+any time you want to change them — it now writes the new hash to MariaDB
+**and** verifies the write by reading the row back before reporting
+success, so the printed credentials are guaranteed to log you in.
 
 ### Step 3 — Set up the elektrond RPC
 
@@ -59,9 +61,11 @@ In **Elektron Net Faucet → Web UI → `/admin.php`**, log in and open
 | RPC Port | `8332` |
 | RPC User | the username from step 1 |
 | RPC Password | the password from step 1 |
-| Wallet Name | `faucet` (matches what we create in step 4) |
+| Wallet Name | `faucet` (matches what we create / import in step 4) |
 
-Save.
+Save. Use **Test RPC** and **Test Unlock** to confirm; both buttons now
+report status inline next to themselves — no more URL leaking like
+`?_ok=1&_msg=…` into the address bar.
 
 ### Step 4 — Create or import a wallet on elektrond
 
@@ -69,7 +73,7 @@ elektron-net-startos exposes the wallet RPC but does **not** ship a UI to
 create or import wallets — this faucet wrapper provides those actions
 instead, since it already holds the RPC credentials.
 
-Pick the path that matches your situation:
+Pick the path that matches your situation.
 
 #### A) Fresh wallet from scratch
 
@@ -80,51 +84,160 @@ Pick the path that matches your situation:
   wallet — fine for a faucet where the operating balance is small)
 - Descriptor Wallet: **on** (recommended)
 
-Then run **Wallet Info** with *Also fetch a fresh receiving address*
-turned on. Copy the address it prints — that goes into **Sender Address**
-in the admin panel (next step).
+Then run **Generate Address & Set as Sender**:
 
-#### B) Migrate from an existing descriptor wallet
+- Wallet Name (override): leave blank
+- Address Label: `faucet`
+- Address Type: `bech32`
 
-If you already have a wallet elsewhere (Bitcoin Core, another node, …):
+The action calls `getnewaddress` and writes the new address straight into
+`Settings → Sender Address` for you. The donation card on the homepage
+goes live the moment it sees a `sender_addr` row.
 
-1. On the source wallet, run `listdescriptors true` via its CLI. Copy the
-   private descriptor string **including the `#checksum`**, e.g.
-   `wpkh(xprv9.../84h/0h/0h/0/*)#abcd1234`.
-2. On the faucet StartOS package, run **Create Wallet on Elektron Net**
-   first (with *Descriptor Wallet* on, **no** passphrase) so a target
-   wallet exists.
-3. Run **Import Descriptor**:
-   - Descriptor: paste from step 1
-   - Range End: `1000` (or higher if you used the source wallet beyond
-     address #1000)
-   - Treat as new key: leave **off** to rescan history
-4. Run **Wallet Info** to confirm the balance.
+#### B) Migrate from an existing wallet.dat on a Windows / desktop node — full walkthrough
 
-> elektron-net prunes blocks older than 137 days, so a rescan past that
-> window will not recover historical UTXOs from before the cutoff.
+This is the scenario you are most likely in if you've been running an
+**existing wallet (e.g. `wallet.dat` on Windows)** and now want the
+faucet to use that same wallet. Read the whole section before you start —
+the order of steps matters.
 
-#### C) Migrate from a legacy wallet.dat
+##### What `wallet.dat` actually is, and why you can't upload it
 
-A `wallet.dat` file is a Berkeley-DB/SQLite file inside elektrond's data
-directory. Container filesystems are isolated, so **the faucet container
-cannot push wallet.dat into the elektrond container** — there is no RPC
-that uploads a wallet file. Two workable approaches:
+`wallet.dat` is a Berkeley-DB binary file inside the source node's
+**data directory** (`%APPDATA%\ElektronNet\wallets\<name>\wallet.dat` on
+Windows). Two reasons it can never be uploaded into StartOS as a file:
 
-1. **Dump the keys, re-import via RPC** (works for any wallet):
-   - On the machine that holds wallet.dat, run `bitcoin-wallet dump
-     -wallet=wallet.dat` or, with the wallet loaded in any compatible
-     Bitcoin Core, call the `dumpwallet` RPC.
-   - For each WIF line in the dump, run **Import Private Key (WIF)** on
-     the faucet package (one key per run). On a fresh descriptor wallet
-     you'll need to create a *legacy* wallet first (Create Wallet with
-     *Descriptor Wallet* turned **off**).
-2. **Replace elektrond's wallet file directly** (advanced):
-   - SSH into the StartOS host, stop the elektrond package, drop your
-     wallet.dat into the elektrond volume under `wallets/faucet/wallet.dat`,
-     start the package, then call **Load Wallet** here with name `faucet`.
-   - This bypasses StartOS's normal abstractions; only do it if you are
-     comfortable with the elektrond data layout.
+1. The faucet container is sandboxed away from the elektrond container's
+   filesystem — StartOS subcontainers do not share `/root/.elektron-net/`.
+2. The elektrond RPC has no method that accepts a binary wallet file
+   over the wire.
+
+The workable approach is to **export the keys as text on the source
+node**, paste that text into a StartOS action, and let the action call
+`importprivkey` for every key. Bitcoin / elektrond both ship the
+`dumpwallet` RPC for exactly this; it produces a plain text file with
+all WIF private keys, all derivation metadata, and label information.
+The receiving wallet rebuilds itself from those keys and is functionally
+identical to the source.
+
+##### Step-by-step from a Windows node
+
+> Before you begin: **make a fresh backup of your source wallet.dat**
+> (e.g. File → Backup Wallet…) and store it offline. Everything below
+> is non-destructive, but key migrations always carry the risk of an
+> operator mistake, and a known-good backup is the cheapest insurance.
+
+1. **Open the debug console on the source node.**
+   In Bitcoin Core / Elektron Net Core (Windows): `Window → Console`.
+   You should see a prompt that lets you type RPC commands.
+
+2. **Choose a file path for the dump.**
+   Anywhere you can write is fine. Example: `C:\Users\you\faucet-dump.txt`.
+   Keep the path short and inside your own user directory — Bitcoin Core
+   rejects paths it cannot write to.
+
+3. **Run dumpwallet in the console.**
+   Type literally (with the quotes and double-backslashes):
+
+   ```
+   dumpwallet "C:\\Users\\you\\faucet-dump.txt"
+   ```
+
+   Press Enter. The console prints `{ "filename": "C:\\Users\\you\\faucet-dump.txt" }`
+   on success. If your wallet is encrypted, run `walletpassphrase
+   "<your-passphrase>" 120` first to unlock it for 120 seconds.
+
+4. **Open `faucet-dump.txt`** in Notepad (or any editor). It looks
+   like this:
+
+   ```
+   # Wallet dump created by Elektron Net …
+   # * Created on 2026-06-26T08:00:00Z
+   # extended private masterkey: xprv9s21…
+
+   KxAbc…ZyW 2024-12-01T10:11:12Z label=savings # addr=be1qclm3…wkc3h4x hdkeypath=m/0'/0'/0
+   L1Def…XyZ 2025-04-08T14:20:00Z label=tips    # addr=be1q…        hdkeypath=m/0'/0'/1
+   …
+   ```
+
+   Each non-comment line is one address. The first column is the WIF
+   private key. The trailing `addr=…` is the address the same key
+   produces on the source network.
+
+5. **Select all (Ctrl + A), copy (Ctrl + C).**
+   You'll paste the whole text — comments and all — into the StartOS
+   action in the next step. Comment lines are ignored automatically; you
+   do not need to clean the file up.
+
+6. **Create a LEGACY wallet on StartOS** to receive the keys.
+   `Elektron Net Faucet → Actions → Create Wallet on Elektron Net`:
+
+   - Wallet Name: `faucet`
+   - Encryption Passphrase: blank
+   - **Descriptor Wallet: OFF** ← important. `importprivkey` only works
+     on legacy wallets; descriptor wallets reject WIFs and require the
+     `Import Descriptor` action instead.
+
+   Save. The action returns `{ "name": "faucet" }`.
+
+7. **Import the dump.**
+   `Elektron Net Faucet → Actions → Import Wallet from dumpwallet`:
+
+   - Wallet Name (override): blank (uses `faucet`)
+   - **dumpwallet output**: paste the text you copied in step 5
+   - Default Label: `imported` (or anything you like)
+   - Rescan the blockchain: **on** (recovers any UTXOs within the
+     ~137-day prune horizon)
+   - **Update Sender Address after import: ON** ← this is the flip you
+     wanted: as soon as all keys are in, the action calls `getnewaddress`
+     and writes the resulting `be1q…` address straight into `settings.sender_addr`
+     — the same row the admin panel's *Sender Address* field reads
+     from. No copy-paste step.
+
+   Click *Submit*. The action loops through every WIF in the dump and
+   calls `importprivkey` per key, only rescanning on the last one to
+   avoid `n × rescan-from-genesis` overhead. When it finishes you
+   see a summary like:
+
+   ```
+   Imported 12/12 keys into wallet "faucet".
+   Blockchain rescan was performed on the last key — UTXOs newer than the
+   ~137-day prune horizon are now visible. Run Wallet Info to confirm balance.
+
+   ✓ Sender Address set to:
+     be1qclm3g723n69ydy7j44as8f625rskhqfwkc3h4x
+     (faucet admin Settings → Sender Address; donation card on the homepage now points here.)
+   ```
+
+8. **Verify in the admin panel.**
+   Reload `/admin.php → Settings`. *Sender Address* should already be
+   populated with the new `be1q…` address. *Wallet Balance* (top KPI
+   row) should reflect anything the rescan found.
+
+##### What if the source is a **descriptor** wallet?
+
+Descriptor wallets (modern Bitcoin Core 23+ default) don't have
+exportable WIFs in the dumpwallet sense — they store output
+descriptors. Use this path instead:
+
+1. On the source node, run `listdescriptors true` in the console. Copy
+   the **private** descriptor string (the one starting with `wpkh(xprv…)`
+   or similar) including the `#abcd1234` checksum at the end.
+2. On StartOS, create a wallet with **Descriptor Wallet: ON** (the
+   default).
+3. Run `Import Descriptor`:
+   - paste the descriptor string into *Descriptor*
+   - leave *Range End* at `1000` (raise it only if you used the source
+     wallet past address index #1000)
+   - *Treat as new key*: **off** so a rescan recovers UTXOs
+4. Run `Generate Address & Set as Sender` afterwards to populate
+   `sender_addr`.
+
+#### C) A single key, not a whole wallet
+
+Use `Actions → Import Private Key (WIF)`. Paste a single WIF, click
+Submit, then run `Generate Address & Set as Sender` to point the faucet
+at the imported key.
 
 #### D) Existing wallet, just point the faucet at it
 
@@ -134,15 +247,13 @@ to use it:
 - Set **Wallet Name** in the admin panel to match the loaded wallet.
 - Run **Load Wallet** if elektrond was restarted (wallets don't reload
   automatically).
-- Run **Wallet Info** to confirm.
+- Run **Generate Address & Set as Sender** to populate `sender_addr`,
+  or paste an existing address into the admin panel by hand.
 
-### Step 5 — Set Sender Address & faucet settings
+### Step 5 — Tune faucet settings
 
-Back in **/admin.php → Settings**:
+In **/admin.php → Settings**:
 
-- **Sender Address** — paste the address from Wallet Info. This is the
-  address payouts come from **and** the address the homepage donation card
-  points at.
 - **Faucet Title / Message / Per-claim Amount / Hourly Budget / Daily
   Budget / Cooldowns** — adjust to taste. Sensible defaults are seeded
   on first start (mirroring the upstream `install.php` defaults).
@@ -150,14 +261,35 @@ Back in **/admin.php → Settings**:
   faucet.
 - **Explorer URL** — optional; populates txid links on the claim result.
 
-Save. The **donation card on the homepage now appears automatically**
-because Sender Address is set. It pulls the live donor list from elektrond
-via `listtransactions`, so no extra wiring is needed.
+Click **Save Settings**. The button is wired through AJAX with triple
+redundancy (URL `?ajax=1` + `X-Requested-With` header + `_ajax=1` form
+field), so the request reaches the JSON path even if a reverse proxy
+strips one of the signals. You'll see a green toast — no more redirect
+URL with `?_ok=1&_msg=…` in the address bar.
 
 ### Step 6 — Fund the wallet
 
 Send some ELEK from your existing wallet to the Sender Address. As soon
 as the first confirmation lands, claims start succeeding.
+
+---
+
+## Actions reference
+
+| Action | What it does |
+| --- | --- |
+| **Show Admin Credentials** | Reads `/etc/elektron-faucet/admin_{username,password}` and prints them. Always reflects the last successful Reset. |
+| **Reset Admin Password** | Hashes the new password with `password_hash(…, PASSWORD_BCRYPT)`, upserts the row in `admin_users`, re-reads it to verify, and only THEN persists the cleartext copies on disk. If any step fails the operator sees the stderr instead of an empty "Password: " line. |
+| **Create Wallet on Elektron Net** | `createwallet` RPC. Pick descriptor (default) or legacy. Legacy is required if you want to import WIFs via `dumpwallet`. |
+| **Load Wallet on Elektron Net** | `loadwallet` RPC. Needed after every elektrond restart — wallets don't auto-load. |
+| **Wallet Info** | `getwalletinfo` + `getbalance` + optional `getnewaddress`. Read-only sanity check. |
+| **Import Private Key (WIF)** | Single-key `importprivkey`. Legacy wallets only. |
+| **Import Descriptor** | `importdescriptors` with one entry — modern equivalent for descriptor wallets. |
+| **Import Wallet from dumpwallet** | Parses a full `dumpwallet` text dump, calls `importprivkey` for every WIF (rescan only on the last one), optionally generates a fresh address and writes it into `settings.sender_addr`. |
+| **Generate Address & Set as Sender** | `getnewaddress` + UPSERT into `settings.sender_addr`. The one-click action for rotating the public donation/payout address. |
+
+All wallet actions authenticate with the RPC credentials saved in the
+faucet admin panel — keep them in sync with elektrond's `rpcauth` entries.
 
 ---
 
@@ -182,9 +314,30 @@ elektrond package — back up both.
 ### Resetting things
 
 - **Forgot the admin password** → run *Show Admin Credentials* (it's
-  always stored on the volume), or *Reset Admin Password* to set a new one.
+  always stored on the volume), or *Reset Admin Password* to set a new
+  one. The reset action now verifies the write round-trip before
+  returning, so the displayed password is guaranteed to log you in.
 - **Want to wipe the DB and start over** → uninstall + reinstall the
   package; the next start will regenerate everything from scratch.
+
+### Why the admin AJAX buttons used to leak `?_ok=1&_msg=…`
+
+The upstream admin panel previously detected AJAX only via the
+`X-Requested-With` header. Some reverse-proxy setups strip that header,
+in which case the server fell back to a redirect URL that exposed the
+operation outcome as query parameters. The fix runs in three layers:
+
+1. The form posts to `admin.php?ajax=1` (URL-level flag).
+2. It still sends `X-Requested-With: XMLHttpRequest` (header-level flag).
+3. It includes a hidden `_ajax=1` form field (body-level flag).
+
+Any one of those three is enough to keep the response on the JSON path.
+The non-AJAX fallback now redirects to a clean `admin.php` URL, so even
+in a worst-case misdetection scenario the address bar stays clean.
+
+All non-submit admin buttons additionally carry `type="button"`, so even
+if JavaScript fails to bind they cannot accidentally trigger a form
+submission.
 
 ### RPC scope
 
